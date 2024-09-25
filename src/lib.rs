@@ -24,13 +24,12 @@
  @notice This contract uses real ZK proof verification and should be thoroughly audited before production use
  */
 
-use cosmwasm_std::{
-    entry_point, to_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult,
-    StdError, Uint128, CosmosMsg, BankMsg, QueryRequest, BankQuery, BalanceResponse,
+ use cosmwasm_std::{
+    entry_point, to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult,
+    StdError, Uint128, CosmosMsg, BankMsg, QueryRequest, BankQuery, BalanceResponse, Addr,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
 use thiserror::Error;
 use bellman::{Circuit, ConstraintSystem, SynthesisError};
 use bls12_381::{Bls12, Scalar};
@@ -86,7 +85,7 @@ mod zk_proof {
         }
     }
 
-    pub struct Proof(Vec<u8>);
+    pub struct Proof(pub Vec<u8>);
 
     impl Proof {
         pub fn new(file_hash: [u8; 32], recipient: [u8; 32], secret: [u8; 32]) -> Self {
@@ -208,6 +207,11 @@ pub enum QueryMsg {
     GetFeePercentage {},
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct InstantiateMsg {
+    pub fee_percentage: Uint128,
+}
+
 // Contract instantiation
 #[entry_point]
 pub fn instantiate(
@@ -221,7 +225,7 @@ pub fn instantiate(
         admin: info.sender.to_string(),
         fee_percentage: msg.fee_percentage,
     };
-    deps.storage.set(b"state", &to_binary(&state)?);
+    deps.storage.set(b"state", &to_json_binary(&state)?);
     Ok(Response::default())
 }
 
@@ -253,7 +257,7 @@ fn record_transfer(
     recipient: String,
     zk_proof: Vec<u8>,
 ) -> Result<Response, ContractError> {
-    let mut state: State = deps.storage.get(b"state").unwrap().unwrap();
+    let mut state: State = deps.storage.get(b"state").and_then(|data| Ok(cosmwasm_std::from_json(data)?)).unwrap();
 
     // Check if transfer already exists
     if state.file_transfers.iter().any(|t| t.file_hash == file_hash && t.recipient == recipient) {
@@ -278,7 +282,7 @@ fn record_transfer(
         transfer_fee,
     };
     state.file_transfers.push(transfer);
-    deps.storage.set(b"state", &to_binary(&state)?);
+    deps.storage.set(b"state", &to_json_binary(&state)?);
 
     Ok(Response::new()
         .add_attribute("action", "record_transfer")
@@ -294,12 +298,12 @@ fn withdraw_fees(
     info: MessageInfo,
     amount: Uint128,
 ) -> Result<Response, ContractError> {
-    let state: State = deps.storage.get(b"state").unwrap().unwrap();
+    let state: State = deps.storage.get(b"state").and_then(|data| Ok(cosmwasm_std::from_json(data)?)).unwrap();
     if info.sender != state.admin {
         return Err(ContractError::Unauthorized {});
     }
 
-    let balance = query_balance(deps.as_ref(), deps.api.addr_validate(&_env.contract.address)?)?;
+    let balance = query_balance(deps.as_ref(), &_env.contract.address)?;
     if balance < amount {
         return Err(ContractError::InsufficientFunds {});
     }
@@ -324,7 +328,7 @@ fn set_fee_percentage(
     info: MessageInfo,
     percentage: Uint128,
 ) -> Result<Response, ContractError> {
-    let mut state: State = deps.storage.get(b"state").unwrap().unwrap();
+    let mut state: State = deps.storage.get(b"state").and_then(|data| Ok(cosmwasm_std::from_json(data)?)).unwrap();
     if info.sender != state.admin {
         return Err(ContractError::Unauthorized {});
     }
@@ -336,7 +340,7 @@ fn set_fee_percentage(
     }
 
     state.fee_percentage = percentage;
-    deps.storage.set(b"state", &to_binary(&state)?);
+    deps.storage.set(b"state", &to_json_binary(&state)?);
 
     Ok(Response::new()
         .add_attribute("action", "set_fee_percentage")
@@ -347,22 +351,22 @@ fn set_fee_percentage(
 #[entry_point]
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
-        QueryMsg::GetFileTransfers {} => to_binary(&query_file_transfers(deps)?),
-        QueryMsg::VerifyTransfer { file_hash, recipient } => to_binary(&query_verify_transfer(deps, file_hash, recipient)?),
-        QueryMsg::GetContractBalance {} => to_binary(&query_contract_balance(deps, _env)?),
-        QueryMsg::GetFeePercentage {} => to_binary(&query_fee_percentage(deps)?),
+        QueryMsg::GetFileTransfers {} => to_json_binary(&query_file_transfers(deps)?),
+        QueryMsg::VerifyTransfer { file_hash, recipient } => to_json_binary(&query_verify_transfer(deps, file_hash, recipient)?),
+        QueryMsg::GetContractBalance {} => to_json_binary(&query_contract_balance(deps, _env)?),
+        QueryMsg::GetFeePercentage {} => to_json_binary(&query_fee_percentage(deps)?),
     }
 }
 
 // Query function to get all file transfers
 fn query_file_transfers(deps: Deps) -> StdResult<Vec<FileTransfer>> {
-    let state: State = deps.storage.get(b"state").unwrap().unwrap();
+    let state: State = deps.storage.get(b"state").and_then(|data| Ok(cosmwasm_std::from_json(data)?)).unwrap();
     Ok(state.file_transfers)
 }
 
 // Query function to verify a specific transfer
 fn query_verify_transfer(deps: Deps, file_hash: String, recipient: String) -> StdResult<bool> {
-    let state: State = deps.storage.get(b"state").unwrap().unwrap();
+    let state: State = deps.storage.get(b"state").and_then(|data| Ok(cosmwasm_std::from_json(data)?)).unwrap();
     Ok(state
         .file_transfers
         .iter()
@@ -371,17 +375,17 @@ fn query_verify_transfer(deps: Deps, file_hash: String, recipient: String) -> St
 
 // Query function to get contract balance
 fn query_contract_balance(deps: Deps, env: Env) -> StdResult<Uint128> {
-    query_balance(deps, deps.api.addr_validate(&env.contract.address)?)
+    query_balance(deps, &env.contract.address)
 }
 
 // Query function to get fee percentage
 fn query_fee_percentage(deps: Deps) -> StdResult<Uint128> {
-    let state: State = deps.storage.get(b"state").unwrap().unwrap();
+    let state: State = deps.storage.get(b"state").and_then(|data| Ok(cosmwasm_std::from_json(data)?)).unwrap();
     Ok(state.fee_percentage)
 }
 
 // Helper function to query balance
-fn query_balance(deps: Deps, address: cosmwasm_std::Addr) -> StdResult<Uint128> {
+fn query_balance(deps: Deps, address: &Addr) -> StdResult<Uint128> {
     let balance: BalanceResponse = deps.querier.query(&QueryRequest::Bank(BankQuery::Balance {
         address: address.to_string(),
         denom: "usei".to_string(),
