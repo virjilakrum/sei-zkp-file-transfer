@@ -1,31 +1,121 @@
 use cosmwasm_std::{
     entry_point, to_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult,
-    StdError, Uint128,
+    StdError, Uint128, CosmosMsg, BankMsg, QueryRequest, BankQuery, BalanceResponse,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use thiserror::Error;
+use bellman::{Circuit, ConstraintSystem, SynthesisError};
+use bls12_381::{Bls12, Scalar};
+use rand::rngs::OsRng;
 
-
+// ZK Proof implementation
 mod zk_proof {
     use super::*;
+
+    pub struct FileTransferCircuit {
+        pub file_hash: Option<[u8; 32]>,
+        pub recipient: Option<[u8; 32]>,
+        pub secret: Option<[u8; 32]>,
+    }
+
+    impl Circuit<Bls12> for FileTransferCircuit {
+        fn synthesize<CS: ConstraintSystem<Bls12>>(
+            self,
+            cs: &mut CS
+        ) -> Result<(), SynthesisError> {
+            let file_hash = cs.alloc_input(
+                || "file hash",
+                || {
+                    self.file_hash.map(|h| Scalar::from_bytes(&h).unwrap())
+                        .ok_or(SynthesisError::AssignmentMissing)
+                }
+            )?;
+
+            let recipient = cs.alloc_input(
+                || "recipient",
+                || {
+                    self.recipient.map(|r| Scalar::from_bytes(&r).unwrap())
+                        .ok_or(SynthesisError::AssignmentMissing)
+                }
+            )?;
+
+            let secret = cs.alloc(
+                || "secret",
+                || {
+                    self.secret.map(|s| Scalar::from_bytes(&s).unwrap())
+                        .ok_or(SynthesisError::AssignmentMissing)
+                }
+            )?;
+
+            cs.enforce(
+                || "secret constraint",
+                |lc| lc + secret,
+                |lc| lc + CS::one(),
+                |lc| lc + file_hash + recipient,
+            );
+
+            Ok(())
+        }
+    }
 
     pub struct Proof(Vec<u8>);
 
     impl Proof {
-        pub fn new(data: Vec<u8>) -> Self {
-            Proof(data)
+        pub fn new(file_hash: [u8; 32], recipient: [u8; 32], secret: [u8; 32]) -> Self {
+            use bellman::groth16::{
+                create_random_proof, generate_random_parameters,
+                prepare_verifying_key, verify_proof,
+            };
+
+            let params = {
+                let c = FileTransferCircuit {
+                    file_hash: Some(file_hash),
+                    recipient: Some(recipient),
+                    secret: Some(secret),
+                };
+                generate_random_parameters::<Bls12, _, _>(c, &mut OsRng).unwrap()
+            };
+
+            let pvk = prepare_verifying_key(&params.vk);
+
+            let c = FileTransferCircuit {
+                file_hash: Some(file_hash),
+                recipient: Some(recipient),
+                secret: Some(secret),
+            };
+
+            let proof = create_random_proof(c, &params, &mut OsRng).unwrap();
+
+            let mut proof_bytes = vec![];
+            proof.write(&mut proof_bytes).unwrap();
+
+            Proof(proof_bytes)
         }
 
-        pub fn verify(&self, public_inputs: &[u8]) -> bool {
-            // In a real implementation, this would be a complex verification process
-            // For this example, we'll use a simple hash comparison
-            let mut hasher = Sha256::new();
-            hasher.update(public_inputs);
-            hasher.update(&self.0);
-            let result = hasher.finalize();
-            result[0] == 0 && result[1] == 0 // Arbitrary condition for demonstration
+        pub fn verify(&self, file_hash: &[u8], recipient: &[u8]) -> bool {
+            use bellman::groth16::{prepare_verifying_key, verify_proof, Proof};
+
+            let params = {
+                let c = FileTransferCircuit {
+                    file_hash: None,
+                    recipient: None,
+                    secret: None,
+                };
+                bellman::groth16::generate_random_parameters::<Bls12, _, _>(c, &mut OsRng).unwrap()
+            };
+
+            let pvk = prepare_verifying_key(&params.vk);
+
+            let proof = Proof::read(&mut &self.0[..]).unwrap();
+
+            let inputs = [
+                Scalar::from_bytes(&file_hash[..32].try_into().unwrap()).unwrap(),
+                Scalar::from_bytes(&recipient[..32].try_into().unwrap()).unwrap(),
+            ];
+
+            verify_proof(&pvk, &proof, &inputs).is_ok()
         }
     }
 }
@@ -43,6 +133,9 @@ pub enum ContractError {
 
     #[error("File transfer already exists")]
     DuplicateTransfer {},
+
+    #[error("Insufficient funds")]
+    InsufficientFunds {},
 }
 
 // Contract state
@@ -50,6 +143,7 @@ pub enum ContractError {
 pub struct State {
     file_transfers: Vec<FileTransfer>,
     admin: String,
+    fee_percentage: Uint128,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -73,6 +167,9 @@ pub enum ExecuteMsg {
     WithdrawFees {
         amount: Uint128,
     },
+    SetFeePercentage {
+        percentage: Uint128,
+    },
 }
 
 // Query messages
@@ -82,6 +179,7 @@ pub enum QueryMsg {
     GetFileTransfers {},
     VerifyTransfer { file_hash: String, recipient: String },
     GetContractBalance {},
+    GetFeePercentage {},
 }
 
 // Contract instantiation
@@ -90,11 +188,12 @@ pub fn instantiate(
     deps: DepsMut,
     _env: Env,
     info: MessageInfo,
-    _msg: InstantiateMsg,
+    msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
     let state = State {
         file_transfers: vec![],
         admin: info.sender.to_string(),
+        fee_percentage: msg.fee_percentage,
     };
     deps.storage.set(b"state", &to_binary(&state)?);
     Ok(Response::default())
@@ -115,6 +214,7 @@ pub fn execute(
             zk_proof,
         } => record_transfer(deps, env, info, file_hash, recipient, zk_proof),
         ExecuteMsg::WithdrawFees { amount } => withdraw_fees(deps, env, info, amount),
+        ExecuteMsg::SetFeePercentage { percentage } => set_fee_percentage(deps, info, percentage),
     }
 }
 
@@ -135,14 +235,14 @@ fn record_transfer(
     }
 
     // Verify ZK proof
-    let proof = zk_proof::Proof::new(zk_proof);
-    let public_inputs = [file_hash.as_bytes(), recipient.as_bytes()].concat();
-    if !proof.verify(&public_inputs) {
+    let proof = zk_proof::Proof(zk_proof);
+    if !proof.verify(file_hash.as_bytes(), recipient.as_bytes()) {
         return Err(ContractError::InvalidProof {});
     }
 
-    // Calculate transfer fee (e.g., 1% of sent amount)
-    let transfer_fee = info.funds.iter().find(|c| c.denom == "usei").map(|c| c.amount / Uint128::new(100)).unwrap_or_default();
+    // Calculate transfer fee
+    let transfer_amount = info.funds.iter().find(|c| c.denom == "usei").map(|c| c.amount).unwrap_or_default();
+    let transfer_fee = transfer_amount * state.fee_percentage / Uint128::new(10000); // fee_percentage is in basis points
 
     let transfer = FileTransfer {
         file_hash: file_hash.clone(),
@@ -173,11 +273,48 @@ fn withdraw_fees(
         return Err(ContractError::Unauthorized {});
     }
 
-    // In a real implementation, you would interact with the bank module here
-    // For this example, we'll just simulate the withdrawal
+    let balance = query_balance(deps.as_ref(), deps.api.addr_validate(&_env.contract.address)?)?;
+    if balance < amount {
+        return Err(ContractError::InsufficientFunds {});
+    }
+
+    let bank_msg = BankMsg::Send {
+        to_address: info.sender.to_string(),
+        amount: vec![cosmwasm_std::Coin {
+            denom: "usei".to_string(),
+            amount,
+        }],
+    };
+
     Ok(Response::new()
+        .add_message(CosmosMsg::Bank(bank_msg))
         .add_attribute("action", "withdraw_fees")
         .add_attribute("amount", amount.to_string()))
+}
+
+// Set fee percentage (admin only)
+fn set_fee_percentage(
+    deps: DepsMut,
+    info: MessageInfo,
+    percentage: Uint128,
+) -> Result<Response, ContractError> {
+    let mut state: State = deps.storage.get(b"state").unwrap().unwrap();
+    if info.sender != state.admin {
+        return Err(ContractError::Unauthorized {});
+    }
+
+    if percentage > Uint128::new(10000) {
+        return Err(ContractError::Std(StdError::generic_err(
+            "Fee percentage must be between 0 and 10000 (100.00%)",
+        )));
+    }
+
+    state.fee_percentage = percentage;
+    deps.storage.set(b"state", &to_binary(&state)?);
+
+    Ok(Response::new()
+        .add_attribute("action", "set_fee_percentage")
+        .add_attribute("percentage", percentage.to_string()))
 }
 
 // Contract queries
@@ -186,7 +323,8 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::GetFileTransfers {} => to_binary(&query_file_transfers(deps)?),
         QueryMsg::VerifyTransfer { file_hash, recipient } => to_binary(&query_verify_transfer(deps, file_hash, recipient)?),
-        QueryMsg::GetContractBalance {} => to_binary(&query_contract_balance(deps)?),
+        QueryMsg::GetContractBalance {} => to_binary(&query_contract_balance(deps, _env)?),
+        QueryMsg::GetFeePercentage {} => to_binary(&query_fee_percentage(deps)?),
     }
 }
 
@@ -206,8 +344,21 @@ fn query_verify_transfer(deps: Deps, file_hash: String, recipient: String) -> St
 }
 
 // Query function to get contract balance
-fn query_contract_balance(deps: Deps) -> StdResult<Uint128> {
-    // In a real implementation, you would query the bank module here
-    // For this example, we'll just return a dummy value
-    Ok(Uint128::new(1000000))
+fn query_contract_balance(deps: Deps, env: Env) -> StdResult<Uint128> {
+    query_balance(deps, deps.api.addr_validate(&env.contract.address)?)
+}
+
+// Query function to get fee percentage
+fn query_fee_percentage(deps: Deps) -> StdResult<Uint128> {
+    let state: State = deps.storage.get(b"state").unwrap().unwrap();
+    Ok(state.fee_percentage)
+}
+
+// Helper function to query balance
+fn query_balance(deps: Deps, address: cosmwasm_std::Addr) -> StdResult<Uint128> {
+    let balance: BalanceResponse = deps.querier.query(&QueryRequest::Bank(BankQuery::Balance {
+        address: address.to_string(),
+        denom: "usei".to_string(),
+    }))?;
+    Ok(balance.amount.amount)
 }
