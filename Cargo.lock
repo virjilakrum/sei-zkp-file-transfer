@@ -72,6 +72,7 @@ dependencies = [
  "byteorder",
  "ff 0.12.1",
  "group 0.12.1",
+ "pairing",
  "rand_core 0.6.4",
  "subtle",
 ]
@@ -124,6 +125,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a3c196a77437e7cc2fb515ce413a6401291578b5afc8ecb29a3c7ab957f05941"
 dependencies = [
  "ff 0.12.1",
+ "group 0.12.1",
+ "pairing",
  "rand_core 0.6.4",
  "subtle",
 ]
@@ -690,6 +693,15 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
+
+[[package]]
+name = "pairing"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "135590d8bdba2b31346f9cd1fb2a912329f5135e832a4f422942eb6ead8b6b3b"
+dependencies = [
+ "group 0.12.1",
+]
 
 [[package]]
 name = "pkcs8"
