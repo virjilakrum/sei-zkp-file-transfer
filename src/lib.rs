@@ -1,27 +1,27 @@
 /**
- * Developer 🏗️: @virjilakrum Baturalp Güvenç
- * @title ZK File Transfer Smart Contract for SEI Blockchain
- * @dev This contract enables secure file transfers using Zero-Knowledge proofs on the SEI blockchain
- * 
- * @notice This contract allows users to record file transfers with ZK proofs, verify transfers, and manage fees
- * 
- * @param file_transfers List of recorded file transfers
- * @param admin Address of the contract administrator
- * @param fee_percentage Percentage of transfer amount charged as fee (in basis points)
- * 
- * @function instantiate Initializes the contract with an admin and fee percentage
- * @function execute Handles incoming transactions (RecordTransfer, WithdrawFees, SetFeePercentage)
- * @function query Handles read-only queries (GetFileTransfers, VerifyTransfer, GetContractBalance, GetFeePercentage)
- * 
- * @dev To use on SEI:
+ Developer 🏗️: @virjilakrum Baturalp Güvenç
+ @title ZK File Transfer Smart Contract for SEI Blockchain
+ @dev This contract enables secure file transfers using Zero-Knowledge proofs on the SEI blockchain
+ 
+ @notice This contract allows users to record file transfers with ZK proofs, verify transfers, and manage fees
+ 
+ @param file_transfers List of recorded file transfers
+ @param admin Address of the contract administrator
+ @param fee_percentage Percentage of transfer amount charged as fee (in basis points)
+ 
+ @function instantiate Initializes the contract with an admin and fee percentage
+ @function execute Handles incoming transactions (RecordTransfer, WithdrawFees, SetFeePercentage)
+ @function query Handles read-only queries (GetFileTransfers, VerifyTransfer, GetContractBalance, GetFeePercentage)
+ 
+ @dev To use on SEI:
  * 1. Compile the contract: cargo build --release --target wasm32-unknown-unknown
  * 2. Optimize the wasm binary (using cosmwasm-opt)
  * 3. Upload the optimized wasm to SEI blockchain using sei-cli
  * 4. Instantiate the contract with initial admin and fee percentage
  * 5. Interact with the contract using sei-cli or a compatible wallet
- * 
- * @notice Ensure all required dependencies are properly set in Cargo.toml
- * @notice This contract uses real ZK proof verification and should be thoroughly audited before production use
+ 
+ @notice Ensure all required dependencies are properly set in Cargo.toml
+ @notice This contract uses real ZK proof verification and should be thoroughly audited before production use
  */
 
 use cosmwasm_std::{
